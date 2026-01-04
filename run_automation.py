@@ -11,10 +11,74 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuration
-WP_URL = os.getenv("WP_URL")  # e.g., https://your-site.com
+WP_URL = os.getenv("WP_URL")
 WP_USERNAME = os.getenv("WP_USERNAME")
 WP_APP_PASSWORD = os.getenv("WP_APP_PASSWORD")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Constants
+CATEGORY_US_STOCKS = "미국주식"
+CATEGORY_KR_STOCKS = "한국주식"
+
+def get_wp_headers():
+    credentials = f"{WP_USERNAME}:{WP_APP_PASSWORD}"
+    token = base64.b64encode(credentials.encode()).decode()
+    return {
+        "Authorization": f"Basic {token}",
+        "Content-Type": "application/json"
+    }
+
+def get_or_create_category(category_name):
+    """Gets category ID by name, or creates it if it doesn't exist."""
+    print(f"Checking category: {category_name}...")
+    headers = get_wp_headers()
+    
+    # 1. Search for category
+    try:
+        search_url = f"{WP_URL}/wp-json/wp/v2/categories?search={category_name}"
+        response = requests.get(search_url, headers=headers)
+        response.raise_for_status()
+        categories = response.json()
+        
+        for cat in categories:
+            if cat['name'] == category_name:
+                return cat['id']
+                
+        # 2. Create if not found
+        print(f"Creating category: {category_name}...")
+        create_url = f"{WP_URL}/wp-json/wp/v2/categories"
+        data = {"name": category_name}
+        response = requests.post(create_url, headers=headers, json=data)
+        response.raise_for_status()
+        return response.json()['id']
+        
+    except Exception as e:
+        print(f"Error managing category {category_name}: {e}")
+        return None
+
+def get_or_create_tag(tag_name):
+    """Gets tag ID by name, or creates it if it doesn't exist."""
+    # Similar logic to categories but for tags
+    headers = get_wp_headers()
+    try:
+        search_url = f"{WP_URL}/wp-json/wp/v2/tags?search={tag_name}"
+        response = requests.get(search_url, headers=headers)
+        response.raise_for_status()
+        tags = response.json()
+        
+        for tag in tags:
+            if tag['name'] == tag_name:
+                return tag['id']
+        
+        create_url = f"{WP_URL}/wp-json/wp/v2/tags"
+        data = {"name": tag_name}
+        response = requests.post(create_url, headers=headers, json=data)
+        response.raise_for_status()
+        return response.json()['id']
+    except Exception as e:
+        print(f"Error managing tag {tag_name}: {e}")
+        return None
+
 
 # Configure Gemini
 if GEMINI_API_KEY:
@@ -112,7 +176,7 @@ def generate_blog_content(topic, data_context):
     today = datetime.date.today().strftime('%Y-%m-%d')
     
     prompt = f"""
-    You are a professional financial blogger. Write a blog post for today ({today}).
+    You are a professional financial analyst and SEO expert. Write a high-quality blog post for today ({today}).
     
     Topic: {topic}
     
@@ -120,68 +184,74 @@ def generate_blog_content(topic, data_context):
     {data_context}
     
     Requirements:
-    1. Title: Catchy and relevant.
-    2. Content: Informative, easy to read, formatted with HTML (use <h2>, <p>, <ul>, <li>).
-    3. Tone: Professional yet engaging.
-    4. Language: Korean (Hangul).
-    5. Length: About 500-800 words.
+    1. **Structure**:
+       - **Title**: Catchy, SEO-optimized, includes key tickers if applicable.
+       - **Introduction**: Hook the reader, summarize the market mood.
+       - **Key Takeaways**: Bullet points of the most important numbers or events.
+       - **Detailed Analysis**: Use <h2> and <h3> headers. Break down the data.
+       - **Conclusion**: Summary and future outlook.
+    2. **Formatting**: Use HTML tags (<h2>, <h3>, <p>, <ul>, <li>, <strong>).
+    3. **SEO**:
+       - Generate a **Meta Description** (150-160 characters).
+       - Generate 3-5 relevant **Tags** (keywords).
+    4. **Tone**: Professional, insightful, yet accessible.
+    5. **Language**: Korean (Hangul).
     
-    Output format:
-    Title: [Your Title Here]
-    Content: [Your HTML Content Here]
+    Output format: JSON
+    {{
+        "title": "Your Title Here",
+        "content": "Your HTML Content Here (do not include <html> or <body> tags, just the inner content)",
+        "meta_description": "Your meta description here",
+        "tags": ["tag1", "tag2", "tag3"]
+    }}
     """
     
     try:
-        response = model.generate_content(prompt)
-        text = response.text
+        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        import json
+        result = json.loads(response.text)
         
-        # Parse title and content
-        title = "Market Update"
-        content = text
-        
-        lines = text.split('\n')
-        for i, line in enumerate(lines):
-            if line.strip().startswith("Title:") or line.strip().startswith("제목:"):
-                title = line.split(':', 1)[1].strip()
-            elif line.strip().startswith("Content:") or line.strip().startswith("내용:"):
-                content = "\n".join(lines[i+1:])
-                break
-                
-        return title, content
+        return result
     except Exception as e:
         print(f"Error generating content: {e}")
-        return None, None
+        return None
 
-def post_to_wordpress(title, content):
-    """Posts content to WordPress."""
+def post_to_wordpress(post_data_dict):
+    """Posts content to WordPress with categories and tags."""
     print("Posting to WordPress...")
     
     if not WP_URL or not WP_USERNAME or not WP_APP_PASSWORD:
         print("Error: WordPress credentials missing.")
         return False
 
-    credentials = f"{WP_USERNAME}:{WP_APP_PASSWORD}"
-    token = base64.b64encode(credentials.encode()).decode()
-    headers = {
-        "Authorization": f"Basic {token}",
-        "Content-Type": "application/json"
-    }
+    headers = get_wp_headers()
     
-    post_data = {
-        "title": title,
-        "content": content,
-        "status": "publish"  # or 'draft'
+    # Prepare tags
+    tag_ids = []
+    if 'tags' in post_data_dict:
+        for tag_name in post_data_dict['tags']:
+            tid = get_or_create_tag(tag_name)
+            if tid:
+                tag_ids.append(tid)
+    
+    wp_post_data = {
+        "title": post_data_dict.get('title'),
+        "content": post_data_dict.get('content'),
+        "excerpt": post_data_dict.get('meta_description'),
+        "status": "publish",
+        "categories": post_data_dict.get('category_ids', []),
+        "tags": tag_ids
     }
     
     try:
         api_url = f"{WP_URL}/wp-json/wp/v2/posts"
-        response = requests.post(api_url, headers=headers, json=post_data)
+        response = requests.post(api_url, headers=headers, json=wp_post_data)
         response.raise_for_status()
         print(f"Successfully posted: {response.json().get('link')}")
         return True
     except Exception as e:
         print(f"Error posting to WordPress: {e}")
-        if response:
+        if 'response' in locals() and response:
             print(f"Response: {response.text}")
         return False
 
@@ -225,12 +295,27 @@ def main():
         print("No data collected. Exiting.")
         return
 
+    # Prepare Category
+    category_id = None
+    if mode == "MARKET":
+        category_id = get_or_create_category(CATEGORY_US_STOCKS)
+    elif mode == "NEWS":
+        # For now, put global news in US stocks or both? Let's default to US for now as it's global/US centric
+        category_id = get_or_create_category(CATEGORY_US_STOCKS)
+        
+    # Ensure "Korean Stocks" category exists for future use
+    get_or_create_category(CATEGORY_KR_STOCKS)
+
     # Generate Content
-    title, content = generate_blog_content(topic, data)
+    generated_data = generate_blog_content(topic, data)
     
-    if title and content:
+    if generated_data:
+        # Add category to data
+        if category_id:
+            generated_data['category_ids'] = [category_id]
+            
         # Post to WordPress
-        post_to_wordpress(title, content)
+        post_to_wordpress(generated_data)
     else:
         print("Failed to generate content.")
 
