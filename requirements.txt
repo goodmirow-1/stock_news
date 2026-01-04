@@ -1,0 +1,5 @@
+yfinance
+requests
+google-generativeai
+beautifulsoup4
+python-dotenv
